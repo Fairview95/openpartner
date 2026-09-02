@@ -119,12 +119,32 @@ describe.skipIf(skipIntegration)('api integration', () => {
     expect(stitchRes.body.firstStitch).toBe(true);
 
     // 6. Server-to-server revenue event.
+    const externalEventId = `dodo:${ulid()}`;
+    const eventBody = {
+      userId,
+      type: 'invoice_paid',
+      value: 200,
+      currency: 'USD',
+      externalEventId,
+    };
     const eventRes = await request(app)
       .post('/attribution/events')
       .set('Authorization', `Bearer ${ADMIN_KEY}`)
-      .send({ userId, type: 'invoice_paid', value: 200, currency: 'USD' });
+      .send(eventBody);
     expect(eventRes.status).toBe(200);
     expect(eventRes.body.attribution.status).toBe('attributed');
+
+    // Dodo retries the same webhook. OpenPartner must return the original
+    // event without running attribution or accruing commission a second time.
+    const replayRes = await request(app)
+      .post('/attribution/events')
+      .set('Authorization', `Bearer ${ADMIN_KEY}`)
+      .send(eventBody);
+    expect(replayRes.status).toBe(200);
+    expect(replayRes.body).toMatchObject({
+      eventId: eventRes.body.eventId,
+      replayed: true,
+    });
 
     // 7. Attribution + Commission rows exist.
     const attributions = await db(TABLES.Attribution).where({ partnerId });
