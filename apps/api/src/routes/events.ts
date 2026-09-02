@@ -11,6 +11,7 @@ const schema = z.object({
   type: z.string().min(1),
   value: z.number().nonnegative().optional(),
   currency: z.string().length(3).optional(),
+  externalEventId: z.string().min(1).max(120).optional(),
   metadata: z.record(z.unknown()).optional(),
   ts: z.string().datetime().optional(),
 });
@@ -28,6 +29,11 @@ eventsRouter.post('/attribution/events', requireAuth, grantScope('events:write')
 
   const eventId = ulid();
   const { userId, type, value, currency, metadata, ts } = body.data;
+  // Keep accepting the metadata shape used by early SDK clients while making
+  // the idempotency key a first-class field for new integrations.
+  const metadataExternalId = metadata?.externalEventId;
+  const externalEventId = body.data.externalEventId
+    ?? (typeof metadataExternalId === 'string' ? metadataExternalId : undefined);
 
   const [event] = await db<EventRow>(TABLES.Event)
     .insert({
@@ -37,11 +43,27 @@ eventsRouter.post('/attribution/events', requireAuth, grantScope('events:write')
       type,
       value: value != null ? value.toFixed(2) : null,
       currency: currency ?? 'USD',
+      externalEventId: externalEventId ?? null,
       metadata: metadata ?? {},
       ts: ts ? new Date(ts) : new Date(),
     })
+    .onConflict('externalEventId')
+    .ignore()
     .returning('*');
 
-  const result = await attributeEvent(db, event as EventRow);
+  if (!event) {
+    const existing = await db<EventRow>(TABLES.Event)
+      .where({ tenantId, externalEventId })
+      .first();
+    if (!existing) {
+      return res.status(409).json({
+        error: 'external_event_id_conflict',
+        detail: 'This external event ID belongs to a different tenant',
+      });
+    }
+    return res.json({ ok: true, eventId: existing.id, replayed: true });
+  }
+
+  const result = await attributeEvent(db, event);
   res.json({ ok: true, eventId, attribution: result });
 });
